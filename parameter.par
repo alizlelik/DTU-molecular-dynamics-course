@@ -1,0 +1,23 @@
+NVT
+FCC
+32
+10000
+161.73
+119.8
+0.336065
+3.405
+39.948
+0.001
+0.5
+
+! ens = ensemble, NVE or NVT
+! conf = configuration of atoms, CCC or FCC
+! N = number of atoms
+! maxstep = number of steps
+! T_system = temperature of the system [K]
+! epsk = epsilon [K]
+! rho = density [g/cm3]
+! sigma [angstrom]
+! xmass [mass of the atom]
+! timestep [ps]
+! taus [ps] relaxation time (only for NVT)
