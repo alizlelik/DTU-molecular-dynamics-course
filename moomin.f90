@@ -1,10 +1,10 @@
 Module ParDataStructure
 
-      double precision :: avogad=6.022045d+23       ! (# of atoms)/mol
-      double precision :: boltz=1.380662d-23        ! J/K
+      double precision :: avogad=6.022045e+23       ! (# of atoms)/mol
+      double precision :: boltz=1.380662e-23        ! J/K
 	  
 	  double precision :: rho, time_simulated, L, T_system, Lred
-	  double precision :: p_system !these are the new ones introduced by me
+	  double precision :: p_system, deltar !these are the new ones introduced by me
 	  
 	  
       double precision :: epsk,eps,epsred,sigma,xmass,mu,timeps
@@ -18,6 +18,7 @@ Module ParDataStructure
 	  integer :: N !these are the new ones 
 	  
 	  double precision, allocatable, dimension(:) :: h_t
+	  integer, dimension(20) :: g_hist
 	  character(3) :: ens, config
 End Module ParDataStructure
 
@@ -29,13 +30,19 @@ Module AtomsDataStructure
 	double precision, allocatable, dimension(:) :: coordx_old, coordy_old, coordz_old
 	double precision, allocatable, dimension(:) :: velx, vely, velz
 	double precision, allocatable, dimension(:) :: Fx,Fy,Fz
-	double precision, allocatable, dimension(:) :: accx,accy,accz !old accelerations for velocity verlet
+	double precision, allocatable, dimension(:,:) :: forcesx, forcesy, forcesz !stored only for pressure calc
+	!double precision, allocatable, dimension(:) :: accx,accy,accz !old accelerations for velocity verlet
 	
 
 End Module AtomsDataStructure
 
 module NVTDataStructure
-	double precision :: Ms, taus, khi, Tdes
+	double precision :: Ms, taus, zeta, Tdes, lns, z, comp
+	double precision, allocatable, dimension(:) :: z_t
+end module
+
+module accelerations !moved  here for velocity verlet debugging
+	double precision, allocatable, dimension(:) :: accx,accy,accz
 
 end module
 
@@ -100,6 +107,10 @@ use NVTDataStructure
       epsred = eps / eps
 	  T_system = T_system * boltz / eps !convert the temperature of the system to reduced units
 	  Tdes = T_system
+	  write(*,*)Tdes,"desired T"
+	  z = 3.0*float(N)*Tdes
+	  zeta = 0.0
+	  lns = 0.0
 !
 ! ----- reduced mass for a diatomic! molecule in kg
 !
@@ -116,12 +127,14 @@ use NVTDataStructure
 	  
 	  taus   = ((eps / (mu * sigma**2.0))**0.5) * 1.0e-12 * 1.0e+10 * taus
 	  
+	  
 	  time_simulated = dt * maxstep
 	  !write(*,*) 'Time simulated (reduced units): ',time_simulated
 	  
 	  if (ens == "NVT") then
-		Ms = 3.0*float(N)*boltz*T_system*(taus**2.0)/eps !reduced????
-		write(*,*)"N",float(N),"kB",boltz,"T",T_system,"taus",taus
+	!	Ms = 100000000
+		Ms = 3.0*float(N)*T_system*(taus**2.0) !reduced????
+		write(*,*)"N",float(N),"T",T_system,"taus",taus
 		write(*,*)"Ms",Ms
 	  end if
 	  write(*,*)"Got parameters"
@@ -197,6 +210,8 @@ L = (float(N)/rho)**(1.0/3.0) !calculate simulation cell length
 
 Lred = L/sigma !reduce simulation cell
 
+deltar = Lred/20.0 !deltar for g(r)
+
 dcell = Lred / float(ncell) !get subcell length
 
 allocate(coordx(N)) !all needed to be able to put coordinate, velocity, force data
@@ -211,9 +226,9 @@ allocate(velz(N))
 allocate(Fx(N))
 allocate(Fy(N))
 allocate(Fz(N))
-allocate(accx(N))
-allocate(accy(N))
-allocate(accz(N))
+allocate(forcesx(N,N))
+allocate(forcesy(N,N))
+allocate(forcesz(N,N))
 
 
 do i = 1, ncell
@@ -297,6 +312,8 @@ L = (N/rho)**(1.0/3.0) !calculate simulation cell length
 ncell = int(N**(1.0/3.0)+0.001) !number of subcells
 Lred = L/sigma !reduce simulation cell
 
+deltar = Lred/20.0 !deltar for g(r)
+
 dcell = Lred / float(ncell) !get subcell length
 
 
@@ -312,9 +329,9 @@ allocate(velz(N))
 allocate(Fx(N))
 allocate(Fy(N))
 allocate(Fz(N))
-allocate(accx(N))
-allocate(accy(N))
-allocate(accz(N))
+!allocate(accx(N))
+!allocate(accy(N))
+!allocate(accz(N))
 
 
 do i = 1, ncell
@@ -386,25 +403,27 @@ T = sumv / 3.0 / float(N) !calculate the temperature, yes N needs to be cast to 
 
 end subroutine
 
-subroutine calc_pressure(press) !!!! UNUSED FOR NVE
+subroutine calc_pressure(press) 
 use AtomsDataStructure
 use ParDataStructure
 double precision, intent(out) :: press
-integer :: i=0
-double precision :: W=0
+integer :: i
+double precision :: W
+
+W = 0.0
 
 do i = 1, N-1
 	do j =i+1, N ! only calculating half of the matrix 
-		!W = W + (coordx(j) - coordx(i)) * forcesx(i,j)
-		!W = W + (coordy(j) - coordy(i)) * forcesy(i,j)
-		!W = W + (coordz(j) - coordz(i)) * forcesz(i,j)
+		W = W + (coordx(j) - coordx(i)) * forcesx(i,j)
+		W = W + (coordy(j) - coordy(i)) * forcesy(i,j)
+		W = W + (coordz(j) - coordz(i)) * forcesz(i,j)
 	end do
 end do
 
 press = W
 do i = 1, N
 
-press = press + mu*(velx(i)**2)+ mu*(vely(i)**2) + mu*(velz(i)**2)
+press = press + (velx(i)**2)+ (vely(i)**2) + (velz(i)**2)
 
 end do
 
@@ -420,7 +439,8 @@ use AtomsDataStructure
 use ParDataStructure
 double precision, dimension(3) :: dist, dist_test
 double precision :: var1,var2,distance,force
-double precision, dimension(N,N) :: forcesx, forcesy, forcesz
+integer :: ii
+!double precision, dimension(N,N) :: forcesx, forcesy, forcesz
 
 forcesx = 0.0 !zero out the forces, these include Fij and Fji
 forcesy = 0.0
@@ -440,6 +460,9 @@ do i = 1, N-1 !the problem is probably somwhere here since everything depending 
 		!calculate forces between pairs
 		call calc_dist(i,j,Lred,dist) !get the distance vector btw the two atoms, does use Lred for cell length as it should
 		distance = sqrt(dist(1)**2+dist(2)**2+dist(3)**2)
+		
+		ii = int(distance/deltar) + 1
+		g_hist(ii) = g_hist(ii) + 2 !add to the histogram, maybe move this to analysis
 		!write(*,*)distance,'distance btw the atoms'
 		
 		var1 = (1.0/distance)**(13.0) !calculate the force from the Lennard-Jones potential
@@ -471,26 +494,26 @@ end do
 
 end subroutine
 
-subroutine ener_force_NVT
+subroutine ener_force_NVT !NOT USED
 use AtomsDataStructure
 use ParDataStructure
 use NVTDataStructure
 double precision, dimension(3) :: dist, dist_test
 double precision :: var1,var2,distance,force
-double precision, dimension(N,N) :: forcesx, forcesy, forcesz
+!double precision, dimension(N,N) :: forcesx, forcesy, forcesz
 
 
 forcesx = 0.0 !zero out the forces, these include Fij and Fji
 forcesy = 0.0
 forcesz = 0.0
 
-if (.not. imd == 1) then
-	do i=1, N !output the old acceleration for the velocity Verlet before zeroing out the force
-		accx(i) = Fx(i) - khi *velx(i)
-		accy(i) = Fy(i) - khi *vely(i)
-		accz(i) = Fz(i) - khi *velz(i)
-	end do
-end if
+!if (.not. imd == 1) then
+!	do i=1, N !output the old acceleration for the velocity Verlet before zeroing out the force
+!		accx(i) = Fx(i) - zeta *velx(i)
+!		accy(i) = Fy(i) - zeta *vely(i)
+!		accz(i) = Fz(i) - zeta *velz(i)
+!	end do
+!end if
 
 ! ----- calculate energy and force
 
@@ -523,6 +546,11 @@ do i = 1, N-1
 		forcesx(j,i) = -forcesx(i,j)  !give the other half of the pair 
 		forcesy(j,i) = -forcesy(i,j)
 		forcesz(j,i) = -forcesz(i,j) 
+		
+		if (imd > 10000) then
+		!g(r)
+		
+		end if
 	end do
 end do	
 
@@ -534,15 +562,16 @@ do i = 1,N !sum up the forces acting on the atoms
 	end do
 end do
 
-if (imd == 1 ) then !just for the first step 
-	do i=1, N 
-		accx(i) = Fx(i) 
-		accy(i) = Fy(i) 
-		accz(i) = Fz(i) 
-	end do
-end if
+!if (imd == 1 ) then !just for the first step 
+!	do i=1, N 
+!		accx(i) = Fx(i) 
+!		accy(i) = Fy(i) 
+!		accz(i) = Fz(i) 
+!	end do
+!end if
 
 end subroutine
+
 
 
 
@@ -617,65 +646,118 @@ subroutine update_NVT
 use AtomsDataStructure
 use ParDataStructure
 use NVTDataStructure
-double precision :: temp, z, sumv, sumva
-double precision, dimension(3) :: old_old, acce
+use accelerations
+
+double precision :: temp, sumv, sumva, zetadot, denom
+double precision, dimension(3) :: old_old
 integer :: i
 
 ! ----- update velocity and coordinate
 !
 
 Ekin = 0.0 !zero out the total kinetic energy
-call calc_temp(T_system) !maybe not necessary, check if T_system is already correctly stored!!
-!write(*,*)T_system,"T"
-!write(*,*)Tdes,"desired T"
-z = 3.0*float(N)*boltz*Tdes
-sumv = 3.0*float(N)*boltz*T_system
+
+!write(*,*)imd,T_system,"T"
+sumv = 3.0*float(N)*T_system !T_system at t
+!write(*,*)imd,sumv,"sumv"
+!write(*,*)imd,z,"z"
 sumva = 0.0
 do i = 1,N
 	!sumv = sumv + velx(i)**2.0 + vely(i)**2.0 + velz(i)**2.0
-	sumva = sumva + velx(i)*accx(i) + vely(i)*accy(i) + velz(i)*accz(i)
+	sumva = sumva + velx(i)*accx(i) + vely(i)*accy(i) + velz(i)*accz(i) !sumva at t
 end do
+
+zetadot = (1.0/Ms) * (sumv - z) !calculate zetadot at t
+!update lns for the Hamiltonian
+lns = lns + zeta*dt + zetadot*dtsq/2.0 !update ln s from t to t+dt
+
+
+!write(*,*)imd,zetadot,"zetadot"
 
 !update the friction coefficient
-khi = khi + (dt/Ms * (sumv - z)) + (dtsq/Ms * sumva)
-!write(*,*)"khi",khi
+zeta = zeta + (dt*zetadot) + (dtsq/Ms * sumva) !update zeta from t to t+dt
+
+
+!write(*,*)imd,zeta,"zeta"
+
+denom = 1.0 + zeta*dt/2.0
+
+!write(*,*)imd,denom
+
+
 
 do i = 1,N
-	temp = coordx(i) + velx(i)*dt +0.5*accx(i)*dtsq	!calculate the new coordinate
-	coordx_old(i) = coordx(i) !put the old coord to the right variable
-	coordx(i) = temp !put the new coord to the right variable
-	!write(*,*)velx(i),"vel before"
-		
-	temp = coordy(i) + vely(i)*dt +0.5*accy(i)*dtsq	!calculate the new coordinate 
-	coordy_old(i) = coordy(i)
-	coordy(i) = temp
-		
-	temp = coordz(i) + velz(i)*dt +0.5*accz(i)*dtsq	!calculate the new coordinate
-	coordz_old(i) = coordz(i)
-	coordz(i) = temp
 
-	velx(i) = (velx(i) + 0.5*dt*(accx(i) + Fx(i)))/(1.0 + 0.5*khi*dt)  !calculate the velocity
-	!write(*,*)velx(i),"vel after"
-	vely(i) = (vely(i) + 0.5*dt*(accy(i) + Fy(i)))/(1.0 + 0.5*khi*dt)
-	velz(i) = (velz(i) + 0.5*dt*(accz(i) + Fz(i)))/(1.0 + 0.5*khi*dt)
-	
-	!acce(1) = Fx(i)-khi*velx(i) !calculate the scaled acceleration
-	!acce(2) = Fy(i)-khi*vely(i)
-	!acce(3) = Fz(i)-khi*velz(i)
+! for some godforsaken reason the algorithm doesn't work if I use the velocity verlet to move the coordinates. the regular Verlet is also O(n^4) error so I will keep using rhe old verlet.
+      if( imd == 1 ) then !in the first step there needs to be a -1st coordinate calculated
+	  
+	  !VERLET 
+		old_old(1)   = coordx(i) - dt * velx(i) + 0.5 * Fx(i) * dtsq
+		old_old(2)   = coordy(i) - dt * vely(i) + 0.5 * Fy(i) * dtsq
+		old_old(3)   = coordz(i) - dt * velz(i) + 0.5 * Fz(i) * dtsq
 		
-	
+		temp = 2.0 * coordx(i) - old_old(1) + Fx(i)*dtsq !calc the new coordinate
+		coordx_old(i) = coordx(i) !put the old coordinate to the right variable
+		coordx(i) = temp !put the new coordinate to the right variable
+		
+		temp = 2.0 * coordy(i) - old_old(2) + Fy(i)*dtsq
+		coordy_old(i) = coordy(i)
+		coordy(i) = temp
+		
+		temp = 2.0 * coordz(i) - old_old(3) + Fz(i)*dtsq
+		coordz_old(i) = coordz(i)
+		coordz(i) = temp
+
+      else
+		! VERLET 
+		
+		temp = 2.0 * coordx(i) - coordx_old(i) + Fx(i)*dtsq	!calculate the new coordinate
+		old_old(1) = coordx_old(i) !put the old coord to the very old coord
+		coordx_old(i) = coordx(i) !put the old coord to the right variable
+		coordx(i) = temp !put the new coord to the right variable
+		
+		temp = 2.0 * coordy(i) - coordy_old(i) + Fy(i)*dtsq		
+		old_old(2) = coordy_old(i) 
+		coordy_old(i) = coordy(i)
+		coordy(i) = temp
+		
+		temp = 2.0 * coordz(i) - coordz_old(i) + Fz(i)*dtsq		
+		old_old(3) = coordz_old(i) 
+		coordz_old(i) = coordz(i)
+		coordz(i) = temp
+		
+      end if
+
+
+		
+
+	temp = velx(i) + (dt*accx(i))/2.0 + (Fx(i)*dt)/2.0 !velocity at t+dt
+	velx(i) = temp/denom
+	temp = vely(i) + (dt*accy(i))/2.0 + (Fy(i)*dt)/2.0
+	vely(i) = temp/denom
+	temp = velz(i) + (dt*accz(i))/2.0 + (Fz(i)*dt)/2.0
+	velz(i) = temp/denom
 		
 	Ekin = Ekin + 0.5 * (velx(i)**2 + vely(i)**2 + velz(i)**2) !sum up the kinetic energy in the system)
+	
+	
+	
 
 end do
 
-!write(*,*)Ekin,"Ekin"
-hamilt = Epot + Ekin !this is okay bc the kinetic energy is calculated after checking the potential before
+!write(*,*)imd,"Epot",Epot,"Ekin",Ekin
+!write(*,*)imd,"lns",lns,"zeta",zeta
+
+hamilt = Epot + Ekin + z*lns +Ms*(zeta**2.0)/2.0
+!hamilt = Epot + Ekin
+!this is okay bc the kinetic energy is calculated after checking the potential before
 
 call calc_temp(T_system)
-!call calc_pressure(p_system)
-write(10,'(6f12.6)')(imd-1.0)*dt,Epot,Ekin,hamilt,T_system
+call calc_pressure(p_system)
+write(10,'(6f12.6)')(imd)*dt,Epot,Ekin,hamilt,T_system,p_system
 h_t(imd) = hamilt
+comp = p_system*(Lred)**3.0/(N*T_system) !compression factor
+z_t(imd) = comp
 end subroutine
 
 
@@ -683,6 +765,7 @@ end subroutine
 subroutine analysis(slope)
 use AtomsDataStructure
 use ParDataStructure
+use NVTDataStructure
 integer :: i, ii
 double precision, dimension(imd) :: h_t_red, times 
 double precision, intent(out) :: slope
@@ -696,6 +779,8 @@ do i = 1,imd
 end do
 
 call linreg(times,h_t_red,slope)
+
+
 
 end subroutine
 
@@ -759,8 +844,9 @@ program moomin
 use AtomsDataStructure
 use ParDataStructure
 use NVTDataStructure
-double precision:: text_index, drift, temp
-integer :: i, ii, imd_i
+use accelerations
+double precision :: text_index, drift, temp
+integer :: i, ii, imd_i, j
 
 
 call random_number(text_index)
@@ -792,7 +878,7 @@ write(*,*)" "
 write(*,*)"MOOMIN is free software, unless you want to pay for it.&
 & But why would you? Go use GROMACS for any serious science."
 write(*,*)" "
-khi = 0.0
+
 
 !open output file
 open( unit=10, file='output.dat', status='unknown' )
@@ -807,11 +893,18 @@ call init_setup_cc
 end if
 write(*,*)"Calculating..."
 
+allocate(accx(N))
+allocate(accy(N))
+allocate(accz(N))
+
 
 allocate(h_t(maxstep))
+allocate(z_t(maxstep))
 h_t = 0.0
-!write(*,*) velx
-!write(*,*) coordx
+z_t = 0.0
+
+g_hist = 0
+
 
 temp = float(maxstep)/100.0
 ii = int(temp-1) !divide the main do loop into two so the analysis is only performed every 100 steps
@@ -846,16 +939,33 @@ if (ens == "NVE") then
 	end do
 	
 elseif (ens == "NVT") then
+
 	do imd_i=1, ii
 		do i = 1, 100
 		imd = (imd_i-1)*100+i
+		
+		if (.not. imd == 1) then
+			accx=Fx - zeta *velx(i)
+			accy=Fy - zeta *vely(i)
+			accz=Fz - zeta *velz(i)
 
-		call ener_force_NVT
-
+		end if
+		!if (all(Fx .eq. accx)) then
+		!	write(*,*)imd,"accelerations correctly casted"
+		!end if
+		call ener_force_NVE
+		
+		if (imd == 1 ) then !just for the first step 
+			accx = Fx
+			accy = Fy
+			accz = Fz
+		end if
+		
 		call update_NVT
 		end do
 		
 		call analysis(drift)
+		z_t(imd_i) = comp
 		
 		WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
 	end do
@@ -864,19 +974,29 @@ elseif (ens == "NVT") then
 
 	do i=1,ii
 		imd = imd +1
-		call ener_force_NVT
+		if (.not. imd == 1) then
+			accx=Fx - zeta *velx(i)
+			accy=Fy - zeta *vely(i)
+			accz=Fz - zeta *velz(i)
+		end if
+		!if (all(Fx .eq. accx)) then
+		!	write(*,*)imd,"accelerations correctly casted"
+		!end if
+		call ener_force_NVE
 		call update_NVT
 	end do
 else
 !other ensembles
 end if
-!WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
+WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
 
-call analysis(drift)
+
 write(*,*)" "
 write(*,*)"Total energy of the system: ",hamilt
 write(*,*)"Total energy drift: ",drift
 write(*,*)"Final system temperature: ",T_system*epsk," K"
+comp = sum(z_t)/max(1,size(z_t))
+write(*,*)"Average compression factor: ",comp
 write(*,*)" "
 
 call goodbye
