@@ -197,7 +197,7 @@ end subroutine
 
 
 
-subroutine init_setup_fcc !only this is changed from CC to FCC
+subroutine init_setup_fcc 
 Use ParDataStructure
 use AtomsDataStructure
 double precision, dimension(N) :: temp
@@ -258,7 +258,6 @@ do i = 1, ncell
 		end do
 	end do
 end do
-
 
 
 delta2 = T_system * mu/mu !calculate deltasquared for gaussian distribution
@@ -466,7 +465,7 @@ Fz = 0.0
 
 Epot = 0.0 !reset Epot before counting everything
 
-cutoff = 2.5*sigma
+cutoff = 2.5*sigma/eps
 
 do i = 1, N-1 !the problem is probably somwhere here since everything depending on the force is messed up
 	do j =i+1, N ! only calculating half of the matrix 
@@ -474,9 +473,11 @@ do i = 1, N-1 !the problem is probably somwhere here since everything depending 
 		call calc_dist(i,j,Lred,dist) !get the distance vector btw the two atoms, does use Lred for cell length as it should
 		distance = sqrt(dist(1)**2+dist(2)**2+dist(3)**2)
 		if (imd >10000) then
-		ii = anint(distance/deltar) + 1
-		g_hist(ii) = g_hist(ii) + 2 !add to the histogram, maybe move this to analysis
-		end if 
+			if (distance < Lred/2.0) then
+				ii = int(distance/deltar) + 1
+				g_hist(ii) = g_hist(ii) + 2 !add to the histogram, maybe move this to analysis
+			end if 
+		end if
 		!write(*,*)distance,'distance btw the atoms'
 		if (isTailOn .eqv. .True.) then!if I want to implement cutoff then this happens
 		
@@ -814,7 +815,7 @@ hamilt = Epot + Ekin + z*lns +Ms*(zeta**2.0)/2.0
 
 call calc_temp(T_system)
 call calc_pressure(p_system)
-write(10,'(6f12.6)')(imd)*dt,Epot,Ekin,hamilt,T_system,zeta
+write(10,'(6f12.6)')(imd)*dt,Epot,Ekin,hamilt,T_system,p_system
 h_t(imd) = hamilt
 comp = p_system*(Lred)**3.0/(N*T_system) !compression factor
 z_t(imd) = comp
@@ -1040,18 +1041,12 @@ elseif (ens == "NVT") then
 
 	do i=1,ii
 		imd = imd +1
-		if (.not. imd == 1) then
-			accx=Fx - zeta *velx(i)
-			accy=Fy - zeta *vely(i)
-			accz=Fz - zeta *velz(i)
-		end if
-		
-		call ener_force_NVE
 		call update_NVT
 	end do
 else
 !other ensembles
 end if
+call analysis(drift)
 WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
 
 
@@ -1067,10 +1062,10 @@ write(*,*)" "
 !write(*,*)g_hist
 do i=1,size(g_hist)
 
-	temp = float(N)*float(maxstep-10000)*rho*(4.0*pi)*(deltar**3.0)*(((i+1)**3.0-i**3.0)/3.0)
+	temp = float(N)*float(maxstep-10000)*(rho*sigma**3.0)*(4.0*pi)*(deltar**3.0)*(((i+1)**3.0-i**3.0)/3.0)
 	!write(*,*)temp
 	g_hist_out(i) = float(g_hist(i))/temp
-	write(11,*)float((i-1))*deltar,g_hist_out(i)
+	write(11,*)((float((i-1))+0.5)*deltar),g_hist_out(i)
 end do
 
 
