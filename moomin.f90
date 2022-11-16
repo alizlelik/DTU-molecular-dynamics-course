@@ -20,7 +20,7 @@ Module ParDataStructure
 	  logical :: isTailOn
 	  
 	  double precision, allocatable, dimension(:) :: h_t
-	  integer, dimension(20) :: g_hist
+	  integer, dimension(60) :: g_hist
 	  character(3) :: ens, config
 End Module ParDataStructure
 
@@ -94,7 +94,6 @@ use NVTDataStructure
 	  
 	  if (ens == "NVT") then
 		read(1,*)taus
-		write(*,*)taus,"taus"
 	  end if
 !
 ! ----- factor in energy and force calculation
@@ -109,7 +108,6 @@ use NVTDataStructure
       epsred = eps / eps
 	  T_system = T_system * boltz / eps !convert the temperature of the system to reduced units
 	  Tdes = T_system
-	  write(*,*)Tdes,"desired T"
 	  z = 3.0*float(N)*Tdes
 	  zeta = 0.0
 	  lns = 0.0
@@ -139,8 +137,6 @@ use NVTDataStructure
 		
 		Ms = 3.0*float(N)*T_system*(taus**2.0)
 		!Ms = 100000000.0
-		write(*,*)"N",float(N),"T",T_system,"taus",taus
-		write(*,*)"Ms",Ms
 	  end if
 	  
 	  !sigma = sigma/eps !reducing sigma?
@@ -217,7 +213,7 @@ L = (float(N)/rho)**(1.0/3.0) !calculate simulation cell length
 
 Lred = L/sigma !reduce simulation cell
 
-deltar = Lred/20.0 !deltar for g(r)
+deltar = Lred/float(size(g_hist)) !deltar for g(r)
 
 dcell = Lred / float(ncell) !get subcell length
 
@@ -477,8 +473,10 @@ do i = 1, N-1 !the problem is probably somwhere here since everything depending 
 		!calculate forces between pairs
 		call calc_dist(i,j,Lred,dist) !get the distance vector btw the two atoms, does use Lred for cell length as it should
 		distance = sqrt(dist(1)**2+dist(2)**2+dist(3)**2)
-		ii = int(distance/deltar) + 1
+		if (imd >10000) then
+		ii = anint(distance/deltar) + 1
 		g_hist(ii) = g_hist(ii) + 2 !add to the histogram, maybe move this to analysis
+		end if 
 		!write(*,*)distance,'distance btw the atoms'
 		if (isTailOn .eqv. .True.) then!if I want to implement cutoff then this happens
 		
@@ -908,6 +906,7 @@ use ParDataStructure
 use NVTDataStructure
 use accelerations
 double precision :: text_index, drift, temp
+double precision, allocatable, dimension(:) :: g_hist_out
 integer :: i, ii, imd_i, j
 
 pi = acos(-1.0) !define pi
@@ -969,6 +968,8 @@ h_t = 0.0
 z_t = 0.0
 
 g_hist = 0
+allocate(g_hist_out(size(g_hist)))
+g_hist = 0.0
 
 isTailOn = .False.
 
@@ -994,7 +995,7 @@ if (ens == "NVE") then
 		end if
 		
 		WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
-		101     FORMAT( a , 'Step number : ',i7,' out of ',i7)
+		101     FORMAT( a , ' Step number : ',i7,' out of ',i7)
 	end do
 
 	ii = maxstep-imd
@@ -1006,6 +1007,7 @@ if (ens == "NVE") then
 	end do
 	
 elseif (ens == "NVT") then
+	imd = 1
 	call ener_force_NVE
 	!write(*,*)"ener_force"
 	do imd_i=1, ii
@@ -1043,9 +1045,7 @@ elseif (ens == "NVT") then
 			accy=Fy - zeta *vely(i)
 			accz=Fz - zeta *velz(i)
 		end if
-		!if (all(Fx .eq. accx)) then
-		!	write(*,*)imd,"accelerations correctly casted"
-		!end if
+		
 		call ener_force_NVE
 		call update_NVT
 	end do
@@ -1056,6 +1056,7 @@ WRITE(*,101, ADVANCE='NO')achar(13),imd, maxstep
 
 
 write(*,*)" "
+write(*,*)" "
 write(*,*)"Total energy of the system: ",hamilt
 write(*,*)"Total energy drift: ",drift
 write(*,*)"Final system temperature: ",T_system*epsk," K"
@@ -1063,8 +1064,15 @@ comp = sum(z_t)/max(1,size(z_t))
 write(*,*)"Average compression factor: ",comp
 write(*,*)" "
 
-!g_hist = g_hist/(float(N)*float(maxstep)*rho*4.0*
-!write(11,'(6f12.6)')g_hist
+!write(*,*)g_hist
+do i=1,size(g_hist)
+
+	temp = float(N)*float(maxstep-10000)*rho*(4.0*pi)*(deltar**3.0)*(((i+1)**3.0-i**3.0)/3.0)
+	!write(*,*)temp
+	g_hist_out(i) = float(g_hist(i))/temp
+	write(11,*)float((i-1))*deltar,g_hist_out(i)
+end do
+
 
 call goodbye
 
