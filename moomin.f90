@@ -4,7 +4,7 @@ Module ParDataStructure
       double precision :: boltz=1.380662e-23        ! J/K
 	  
 	  double precision :: rho, time_simulated, L, T_system, Lred
-	  double precision :: p_system, deltar !these are the new ones introduced by me
+	  double precision :: p_system, deltar, pi !these are the new ones introduced by me
 	  
 	  
       double precision :: epsk,eps,epsred,sigma,xmass,mu,timeps
@@ -16,6 +16,8 @@ Module ParDataStructure
       integer :: maxstep,imd
 	  
 	  integer :: N !these are the new ones 
+	  
+	  logical :: isTailOn
 	  
 	  double precision, allocatable, dimension(:) :: h_t
 	  integer, dimension(20) :: g_hist
@@ -111,6 +113,8 @@ use NVTDataStructure
 	  z = 3.0*float(N)*Tdes
 	  zeta = 0.0
 	  lns = 0.0
+	  
+	  
 !
 ! ----- reduced mass for a diatomic! molecule in kg
 !
@@ -132,11 +136,14 @@ use NVTDataStructure
 	  !write(*,*) 'Time simulated (reduced units): ',time_simulated
 	  
 	  if (ens == "NVT") then
-	!	Ms = 100000000
-		Ms = 3.0*float(N)*T_system*(taus**2.0) !reduced????
+		
+		Ms = 3.0*float(N)*T_system*(taus**2.0)
+		!Ms = 100000000.0
 		write(*,*)"N",float(N),"T",T_system,"taus",taus
 		write(*,*)"Ms",Ms
 	  end if
+	  
+	  !sigma = sigma/eps !reducing sigma?
 	  write(*,*)"Got parameters"
       return 
 	  
@@ -408,7 +415,7 @@ use AtomsDataStructure
 use ParDataStructure
 double precision, intent(out) :: press
 integer :: i
-double precision :: W
+double precision :: W, p_tail, cutoff
 
 W = 0.0
 
@@ -429,6 +436,14 @@ end do
 
 press = 1.0/3.0 * press /(Lred**3.0)
 
+if (isTailOn .eqv. .True.) then
+
+cutoff = 1.0/2.5 !this is actually 1/rc here
+p_tail = 32.0/9.0 * pi*rho**2.0*(sigma/eps)**3.0*(cutoff**9.0-1.5*cutoff**3.0)
+press = press + p_tail
+
+end if
+
 end subroutine
 
 
@@ -438,7 +453,7 @@ subroutine ener_force_NVE
 use AtomsDataStructure
 use ParDataStructure
 double precision, dimension(3) :: dist, dist_test
-double precision :: var1,var2,distance,force
+double precision :: var1,var2,distance,force,cutoff
 integer :: ii
 !double precision, dimension(N,N) :: forcesx, forcesy, forcesz
 
@@ -455,15 +470,38 @@ Fz = 0.0
 
 Epot = 0.0 !reset Epot before counting everything
 
+cutoff = 2.5*sigma
+
 do i = 1, N-1 !the problem is probably somwhere here since everything depending on the force is messed up
 	do j =i+1, N ! only calculating half of the matrix 
 		!calculate forces between pairs
 		call calc_dist(i,j,Lred,dist) !get the distance vector btw the two atoms, does use Lred for cell length as it should
 		distance = sqrt(dist(1)**2+dist(2)**2+dist(3)**2)
-		
 		ii = int(distance/deltar) + 1
 		g_hist(ii) = g_hist(ii) + 2 !add to the histogram, maybe move this to analysis
 		!write(*,*)distance,'distance btw the atoms'
+		if (isTailOn .eqv. .True.) then!if I want to implement cutoff then this happens
+		
+			if (distance < cutoff) then
+				var1 = (1.0/distance)**(13.0) !calculate the force from the Lennard-Jones potential
+				var2 = -(1.0/distance)**(7.0)
+				force = -48.0*(var1+0.5*var2)
+		
+				var1 = (1.0/distance)**(12.0) !add the potential from the force to the total potential
+				var2 = (1.0/distance)**(6.0) 
+				Epot = Epot + 4.0*(var1-var2)
+		
+
+				forcesx(i,j) = dist(1)/distance * force
+				forcesy(i,j) = dist(2)/distance * force
+				forcesz(i,j) = dist(3)/distance * force
+
+				forcesx(j,i) = -forcesx(i,j)  !give the other half of the pair 
+				forcesy(j,i) = -forcesy(i,j)
+				forcesz(j,i) = -forcesz(i,j) 
+		
+			end if
+		else
 		
 		var1 = (1.0/distance)**(13.0) !calculate the force from the Lennard-Jones potential
 		var2 = -(1.0/distance)**(7.0)
@@ -481,6 +519,8 @@ do i = 1, N-1 !the problem is probably somwhere here since everything depending 
 		forcesx(j,i) = -forcesx(i,j)  !give the other half of the pair 
 		forcesy(j,i) = -forcesy(i,j)
 		forcesz(j,i) = -forcesz(i,j) 
+		
+		end if
 	end do
 end do	
 
@@ -657,7 +697,15 @@ integer :: i
 
 Ekin = 0.0 !zero out the total kinetic energy
 
+!if (.not. imd == 1) then
+accx=Fx - zeta *velx
+accy=Fy - zeta *vely
+accz=Fz - zeta *velz
+
+!end if
+
 !write(*,*)imd,T_system,"T"
+call calc_temp(T_system)
 sumv = 3.0*float(N)*T_system !T_system at t
 !write(*,*)imd,sumv,"sumv"
 !write(*,*)imd,z,"z"
@@ -689,47 +737,64 @@ denom = 1.0 + zeta*dt/2.0
 do i = 1,N
 
 ! for some godforsaken reason the algorithm doesn't work if I use the velocity verlet to move the coordinates. the regular Verlet is also O(n^4) error so I will keep using rhe old verlet.
-      if( imd == 1 ) then !in the first step there needs to be a -1st coordinate calculated
+      !if( imd == 1 ) then !in the first step there needs to be a -1st coordinate calculated
 	  
 	  !VERLET 
-		old_old(1)   = coordx(i) - dt * velx(i) + 0.5 * Fx(i) * dtsq
-		old_old(2)   = coordy(i) - dt * vely(i) + 0.5 * Fy(i) * dtsq
-		old_old(3)   = coordz(i) - dt * velz(i) + 0.5 * Fz(i) * dtsq
+		!old_old(1)   = coordx(i) - dt * velx(i) + 0.5 * Fx(i) * dtsq
+		!old_old(2)   = coordy(i) - dt * vely(i) + 0.5 * Fy(i) * dtsq
+		!old_old(3)   = coordz(i) - dt * velz(i) + 0.5 * Fz(i) * dtsq
 		
-		temp = 2.0 * coordx(i) - old_old(1) + Fx(i)*dtsq !calc the new coordinate
-		coordx_old(i) = coordx(i) !put the old coordinate to the right variable
-		coordx(i) = temp !put the new coordinate to the right variable
+		!temp = 2.0 * coordx(i) - old_old(1) + Fx(i)*dtsq !calc the new coordinate
+		!coordx_old(i) = coordx(i) !put the old coordinate to the right variable
+		!coordx(i) = temp !put the new coordinate to the right variable
 		
-		temp = 2.0 * coordy(i) - old_old(2) + Fy(i)*dtsq
-		coordy_old(i) = coordy(i)
-		coordy(i) = temp
+		!temp = 2.0 * coordy(i) - old_old(2) + Fy(i)*dtsq
+		!coordy_old(i) = coordy(i)
+		!coordy(i) = temp
 		
-		temp = 2.0 * coordz(i) - old_old(3) + Fz(i)*dtsq
-		coordz_old(i) = coordz(i)
-		coordz(i) = temp
+		!temp = 2.0 * coordz(i) - old_old(3) + Fz(i)*dtsq
+		!coordz_old(i) = coordz(i)
+		!coordz(i) = temp
 
-      else
+     ! else
 		! VERLET 
 		
-		temp = 2.0 * coordx(i) - coordx_old(i) + Fx(i)*dtsq	!calculate the new coordinate
-		old_old(1) = coordx_old(i) !put the old coord to the very old coord
-		coordx_old(i) = coordx(i) !put the old coord to the right variable
-		coordx(i) = temp !put the new coord to the right variable
+		!temp = 2.0 * coordx(i) - coordx_old(i) + Fx(i)*dtsq	!calculate the new coordinate
+		!old_old(1) = coordx_old(i) !put the old coord to the very old coord
+		!coordx_old(i) = coordx(i) !put the old coord to the right variable
+		!coordx(i) = temp !put the new coord to the right variable
 		
-		temp = 2.0 * coordy(i) - coordy_old(i) + Fy(i)*dtsq		
-		old_old(2) = coordy_old(i) 
-		coordy_old(i) = coordy(i)
-		coordy(i) = temp
+		!temp = 2.0 * coordy(i) - coordy_old(i) + Fy(i)*dtsq		
+		!old_old(2) = coordy_old(i) 
+		!coordy_old(i) = coordy(i)
+		!coordy(i) = temp
 		
-		temp = 2.0 * coordz(i) - coordz_old(i) + Fz(i)*dtsq		
-		old_old(3) = coordz_old(i) 
-		coordz_old(i) = coordz(i)
-		coordz(i) = temp
+	!	temp = 2.0 * coordz(i) - coordz_old(i) + Fz(i)*dtsq		
+	!	old_old(3) = coordz_old(i) 
+	!	coordz_old(i) = coordz(i)
+	!	coordz(i) = temp
 		
-      end if
+     ! end if
+
+	coordx(i) = coordx(i) + velx(i)*dt +accx(i)*(dt**2.0)/2.0	!calculate the new coordinate
+		
+	coordy(i) = coordy(i) + vely(i)*dt +accy(i)*(dt**2.0)/2.0	!calculate the new coordinate 
+		
+	coordz(i) = coordz(i) + velz(i)*dt +accz(i)*(dt**2.0)/2.0	!calculate the new coordinate
+
+		
+
+	
+	
+	
+	
+
+end do
 
 
-		
+call ener_force_NVE !move F from t do t+dt
+
+do i = 1,N
 
 	temp = velx(i) + (dt*accx(i))/2.0 + (Fx(i)*dt)/2.0 !velocity at t+dt
 	velx(i) = temp/denom
@@ -739,9 +804,6 @@ do i = 1,N
 	velz(i) = temp/denom
 		
 	Ekin = Ekin + 0.5 * (velx(i)**2 + vely(i)**2 + velz(i)**2) !sum up the kinetic energy in the system)
-	
-	
-	
 
 end do
 
@@ -754,7 +816,7 @@ hamilt = Epot + Ekin + z*lns +Ms*(zeta**2.0)/2.0
 
 call calc_temp(T_system)
 call calc_pressure(p_system)
-write(10,'(6f12.6)')(imd)*dt,Epot,Ekin,hamilt,T_system,p_system
+write(10,'(6f12.6)')(imd)*dt,Epot,Ekin,hamilt,T_system,zeta
 h_t(imd) = hamilt
 comp = p_system*(Lred)**3.0/(N*T_system) !compression factor
 z_t(imd) = comp
@@ -848,6 +910,8 @@ use accelerations
 double precision :: text_index, drift, temp
 integer :: i, ii, imd_i, j
 
+pi = acos(-1.0) !define pi
+
 
 call random_number(text_index)
 
@@ -882,6 +946,7 @@ write(*,*)" "
 
 !open output file
 open( unit=10, file='output.dat', status='unknown' )
+open( unit=11, file='output_gr.dat', status='unknown' )
 
 call get_parameter
 
@@ -904,6 +969,8 @@ h_t = 0.0
 z_t = 0.0
 
 g_hist = 0
+
+isTailOn = .False.
 
 
 temp = float(maxstep)/100.0
@@ -939,27 +1006,24 @@ if (ens == "NVE") then
 	end do
 	
 elseif (ens == "NVT") then
-
+	call ener_force_NVE
+	!write(*,*)"ener_force"
 	do imd_i=1, ii
 		do i = 1, 100
 		imd = (imd_i-1)*100+i
 		
-		if (.not. imd == 1) then
-			accx=Fx - zeta *velx(i)
-			accy=Fy - zeta *vely(i)
-			accz=Fz - zeta *velz(i)
-
-		end if
+		
 		!if (all(Fx .eq. accx)) then
 		!	write(*,*)imd,"accelerations correctly casted"
 		!end if
-		call ener_force_NVE
+		!call ener_force_NVE
 		
-		if (imd == 1 ) then !just for the first step 
-			accx = Fx
-			accy = Fy
-			accz = Fz
-		end if
+		!if (imd == 1 ) then !just for the first step 
+			
+		!	accx = Fx
+		!	accy = Fy
+		!	accz = Fz
+		!end if
 		
 		call update_NVT
 		end do
@@ -998,6 +1062,9 @@ write(*,*)"Final system temperature: ",T_system*epsk," K"
 comp = sum(z_t)/max(1,size(z_t))
 write(*,*)"Average compression factor: ",comp
 write(*,*)" "
+
+!g_hist = g_hist/(float(N)*float(maxstep)*rho*4.0*
+!write(11,'(6f12.6)')g_hist
 
 call goodbye
 
